@@ -1,14 +1,13 @@
-# sprinkler-solver
-Simple WIP solver for hydraulic circuits, Focused on sprinkler systems
+#  Nearest path inside polygon using triangulation 
 
-Components:
-  - DSL for grid description
-    - Tree
-    - Grid
-  - pass for 3D coordinate system construction
-  - pressure and flow solver
-  - 3D Graphics multi-backend
-    - Mecha
-    - Diagrams 
-  - Report backend
-    - CSV
+The triangulate code is copied from GeomAlgLib repository repo
+
+This code implement the simple duck funnel algorithm to search for paths inside a polygon
+
+TODO : 
+- Improve triangulation to support holes. (FFI Triangle and use delaunay triangulation)
+- Support 3d polygon
+- Search for multiple paths in polygons with holes
+- Improve Graph search
+
+
