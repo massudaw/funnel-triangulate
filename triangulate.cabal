@@ -18,6 +18,20 @@ cabal-version:       >=1.10
 library
   exposed-modules:
     Triangulation
+    ,Polygon
+    ,Point2
+    ,Circle
+    ,PointClass
+    ,StatusStructureSpec
+    ,Triangle
+    ,Line
+    ,Basics.Utilities
+    ,Basics.Sorting
+    ,Basics.Sort
+    ,Basics.ListCat
+    ,GareysTriangulation
+    ,MonotoneTriangulation
+    ,MonotonePartition
   build-depends:        base >=4.7 && <4.9
                       , random
                       , text

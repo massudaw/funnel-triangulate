@@ -11,6 +11,7 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import Data.Monoid
 import Language.Mecha
+import Language.Mecha.Solid
 import Data.Tuple
 import Data.Maybe
 
@@ -36,16 +37,16 @@ data PolygonSet ix a
   }deriving Show
 
 file = do
-  Right f <- readDXF "/home/massudaw/src/dxf/PATH.DXF"
-  let [Entity a1 ob (LWPOLYLINE _ _ _ b)] = filter ((== "room").layer. eref) $ entities f
+  Right f <- readDXF "/home/massudaw/src/triangulate/PATH.DXF"
+  let [Entity a1 ob (LWPOLYLINE _ _ _ b _ _ )] = filter ((== "room").layer. eref) $ entities f
       door = filter ((== "origin").layer. eref) $ entities f
       pessoa = head $ filter ((== "pessoa").layer. eref ) $ entities f
       saida = filter ((== "saida").layer . eref ) $ entities f
       projC (Entity _ _  (CIRCLE(V3 tx ty _ ) _ )) = Point2 (tx,ty)
-      entity = fmap (\(V2 a b  ) -> Point2 (a, b)) b
+      entity = fmap (\(V2 a b  ,_) -> Point2 (a, b)) b
   o <- t1 (projC pessoa) (projC <$> saida) entity
-  let genPath o = (\s -> Entity a1 (ob {layer = "rotas"})  (LWPOLYLINE False 0 Nothing (fmap (\(Point2 (a,b)) -> V2 a b  ) o)))
-  writeDXF "/home/massudaw/src/dxf/PATHW.DXF" $ (foldr addEntity f (genPath <$> o))
+  let genPath o = (\s -> Entity a1 (ob {layer = "rotas", handle = s})  (LWPOLYLINE False 0 Nothing (fmap (\(Point2 (a,b)) -> (V2 a b  ,Nothing)) o ) Nothing Nothing ))
+  writeDXF "/home/massudaw/src/triangulate/PATHW.DXF" (foldr addEntity f (genPath <$> o))
 
 incSeed (Header m s) = (s,Header m (s+1))
 
@@ -55,6 +56,10 @@ addEntity en dxf = dxf { header = nh , entities = e:(entities  dxf)}
 
 
 --  make a edge path oriented in CCW direction
+reorderpath
+  :: (Num a, Ord a) =>
+     Point2 a
+     -> [(t, (Point2 a, Point2 a))] -> [(t, (Point2 a, Point2 a))]
 reorderpath p1 ((i,(a,b)):xs)
   | ta == 0 =  if b == p1
         then (i,(b,a)): reorderpath b xs
@@ -81,8 +86,6 @@ funnel _ t apx (pl,pr) l i
            =  Just [pr,t]
         | otherwise
            = Just [t]
-
-
 funnel  (ir,il) t apx (pl,pr) xl ip =
     let
       cr = area2 apx pr r <= 0.0
@@ -113,20 +116,20 @@ funnel  (ir,il) t apx (pl,pr) xl ip =
                     iapx = ir
                 in (pr:) <$> deg "cutlfr" (funnel  (iapx,iapx) t apx (apx,apx) xl iapx  )-}
         | cr
-          = if ccr && not (vequal r  pr)
+          = if ccr
               then deg "forwr"  $ funnel (i,il) t apx (pl,r) xl i
               else
                 let apx = pl
                     iapx = il
                 in (pl:) <$> deg "cutr"   (funnel (iapx,iapx) t apx (apx,apx) xl iapx )
         | cl
-          = if ccl -- && not (vequal r  pr)
+          = if ccl
               then deg "forwl" $ funnel  (ir,i) t apx (l,pr) xl i
               else
                 let apx = pr
                     iapx = ir
                 in (pr:) <$> deg "cutl" (funnel  (iapx,iapx) t apx (apx,apx) xl iapx  )
-        | otherwise  =deg "other" $ funnel  (ir,il)t apx (r,l) xl i
+        | otherwise  = deg "increment"  $ funnel  (ir,il) t apx (pl,pr) xl i
      in ret
 
 
@@ -143,6 +146,7 @@ loadEdge g i = case lookE i of
     lookV e = fromJust $ M.lookup e (M.fromList (nodes g))
 
 lookT i = fromJust . L.find (flip containsBNV i.snd)
+
 
 portals (pa,po) = catMaybes $fmap (flip M.lookup po) $ zip p (drop 1 p)
   where
@@ -191,6 +195,7 @@ justError i _ = error i
 
 -- Rendering
 
+edge :: Show a => (a, (Point2 Double, Point2 Double)) -> Solid
 edge (i,t@(a,b@(Point2 (bx,by)))) = color (0,1,0,1) $ union (moveP b $ sphere 0.6 ) $ union (moveZ 1 $ moveP cen (scale (0.05,0.05,0.05) $ text (show i)) ) $  (extrude (Polygon (reverse [conv a, (\[i,j] -> [i -0.01,j+0.01]) (conv a) , conv b , (\[i,j] -> [i - 0.01,j+0.01]) (conv b)]) []) 0.3)
   where conv (Point2 (a,b)) = [a,b]
         cen = center t
@@ -203,6 +208,7 @@ triangulate (r,(i,t@(Triangle (a,b,c)))) =  color (1,r,0,1) $ union (moveZ 1 $ m
 
 moveP (Point2 (x,y)) = move (x,y,0)
 conv (Point2 (a,b)) = [a,b]
+convV3 z (Point2 (a,b)) = (a, b, z)
 
 line l = [color (0,0,1,1) $ extrude (Polygon (f <> reverse (fmap (\[i,j]-> [i-0.01 ,j+0.02]) f)) []) 0.3]
   where f = fmap conv l
@@ -223,12 +229,20 @@ genpath po  p1 p2 = (p1 : ) <$> f
   where a  = paths p1 p2 po
         f = funnel (0,0) p2 p1  (p1,p1)  (reorderpath p1 . portals  $ a) (-1)
 
+limitrange l o [] = [(o,l)]
+limitrange l o (x:xs)
+  | distance o x > l  = [(o ,l)] <> zip xs (repeat 0)
+  | distance o x <= l  = (o, distance o x) : limitrange (l - distance o x) x xs
+
+plotLimitedLine (o,l) =    union (move (convV3 (-3) o ) $ extrude ( Circle  l) 1) (move (convV3 (0) o ) $sphere 0.6)
+
 t1 p1 tar test = do
   let po = poly test
   s <- getStdGen
   let r = randoms s
-  let f = fmap (genpath po p1) tar
-  T.writeFile "test.scad" (openSCAD (Statements $ [moveP p1 (sphere 1)] <> fmap (\p2 -> moveP p2 (cube 1)) tar  <> (triangulate  <$>  (zip r $ snd po)) <> (concat $ line <$> catMaybes f)))
-  return (catMaybes f)
+  let f = catMaybes $ fmap (genpath po p1) tar
+  let lline = concat $ fmap (\f-> plotLimitedLine <$> limitrange 20 (head f) (tail f) )f
+  T.writeFile "test.scad" (openSCAD (Statements $ [moveP p1 (sphere 1)] <> fmap (\p2 -> moveP p2 (cube 1)) tar  {-<> ( concat $ fmap edge .   (\p2 -> reorderpath p1 . portals $  paths p1 p2  po ) <$> tar )-} <> (triangulate  <$>  (zip r $ snd po)) <> lline <> (concat $ line <$> f)))
+  return (f)
 
 
