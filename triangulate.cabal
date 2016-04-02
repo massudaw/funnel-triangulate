@@ -25,6 +25,7 @@ library
     ,StatusStructureSpec
     ,Triangle
     ,Line
+    ,Search
     ,Basics.Utilities
     ,Basics.Sorting
     ,Basics.Sort

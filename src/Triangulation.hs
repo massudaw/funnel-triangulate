@@ -2,11 +2,12 @@
 module Triangulation where
 
 import Data.Ord
+import Search
 import System.Random
 import GareysTriangulation
 import Control.Applicative
-import DXF.Parser
-import DXF.Writer
+import DXF
+import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import Data.Monoid
@@ -27,8 +28,8 @@ import qualified Data.Array as A
 import Data.Graph
 import Debug.Trace
 import qualified Data.Foldable as F
-
 import Numeric
+
 data PolygonSet ix a
   = PolygonSet
   { nodes :: [(ix,Point2 a)]
@@ -36,7 +37,7 @@ data PolygonSet ix a
   , triangles :: [(ix,[(ix,Bool)])]
   }deriving Show
 
-file = do
+testDXF = do
   Right f <- readDXF "/home/massudaw/src/triangulate/PATH.DXF"
   let [Entity a1 ob (LWPOLYLINE _ _ _ b _ _ )] = filter ((== "room").layer. eref) $ entities f
       door = filter ((== "origin").layer. eref) $ entities f
@@ -44,15 +45,9 @@ file = do
       saida = filter ((== "saida").layer . eref ) $ entities f
       projC (Entity _ _  (CIRCLE(V3 tx ty _ ) _ )) = Point2 (tx,ty)
       entity = fmap (\(V2 a b  ,_) -> Point2 (a, b)) b
-  o <- t1 (projC pessoa) (projC <$> saida) entity
+  o <- searchPaths (projC pessoa) (projC <$> saida) entity
   let genPath o = (\s -> Entity a1 (ob {layer = "rotas", handle = s})  (LWPOLYLINE False 0 Nothing (fmap (\(Point2 (a,b)) -> (V2 a b  ,Nothing)) o ) Nothing Nothing ))
   writeDXF "/home/massudaw/src/triangulate/PATHW.DXF" (foldr addEntity f (genPath <$> o))
-
-incSeed (Header m s) = (s,Header m (s+1))
-
-addEntity en dxf = dxf { header = nh , entities = e:(entities  dxf)}
-  where e = en s
-        (s,nh ) = incSeed (header dxf)
 
 
 --  make a edge path oriented in CCW direction
@@ -132,8 +127,6 @@ funnel  (ir,il) t apx (pl,pr) xl ip =
         | otherwise  = deg "increment"  $ funnel  (ir,il) t apx (pl,pr) xl i
      in ret
 
-
-
 vequal :: Point2 Double -> Point2 Double -> Bool
 vequal a b  = distance a b < eq
   where eq = 1e-12
@@ -148,22 +141,15 @@ loadEdge g i = case lookE i of
 lookT i = fromJust . L.find (flip containsBNV i.snd)
 
 
-portals (pa,po) = catMaybes $fmap (flip M.lookup po) $ zip p (drop 1 p)
-  where
-    p = concat $ fmap F.toList pa
+portals (pa,po) = catMaybes .fmap (flip M.lookup po) <$> pa
 
-pruneForest i = filter (pruneTarget i) . fmap (pruneNode i )
-pruneNode i (Node r f ) = Node r (pruneForest i f )
 
-pruneTarget i (Node r f)
-  | f == [] = r == i
-  | otherwise  = L.any  (pruneTarget i)  f
-
+-- Search edges between triangles and path connection points
 paths i t (g , l) =
     let
       (pini,_) = lookT i l
       (ptar,_) = lookT t l
-    in (pruneForest ptar $  dfs gr  [pini,ptar] , M.fromList $ concat $ (\(e,[(i,ib),(j,jb)]) -> [(i,(if ib then fmap swap else id )$ loadEdge g e),(j,(if jb then fmap swap else id )$  loadEdge g e)]  ) <$>  c2)
+    in (connected pini ptar gr , M.fromList $ concat $ (\(e,[(i,ib),(j,jb)]) -> [(i,(if ib then fmap swap else id )$ loadEdge g e),(j,(if jb then fmap swap else id )$  loadEdge g e)]  ) <$>  c2)
   where
     swapP (Point2 t) = Point2 (swap t)
     gr  = buildG (0,L.length l-1) $ (concat  c1)
@@ -176,10 +162,11 @@ paths i t (g , l) =
             mp (e,[a,b]) = ([(a,b),(b,a)])
             mp (e,i ) = error (show i)
 
-poly :: [Point2 Double] -> (PolygonSet Int Double, [(Int,Triangle Point2 Double)])
-poly nodes =  (PolygonSet (zip [0..] nodes) (zip [0..] links) (zip [0..] trigs) ,  zip [0..] triangles)
+-- Triangulate and create a datastructure with nodes and edges
+triangulate :: [Point2 Double] -> (PolygonSet Int Double, [(Int,Triangle Point2 Double)])
+triangulate nodes =  (PolygonSet (zip [0..] nodes) (zip [0..] links) (zip [0..] trigs) ,  zip [0..] triangles)
   where
-    triangles =  garey (PolygonCW nodes)
+    triangles =  garey (PolygonCCW nodes)
     tri (Triangle (ap,bp,cp)) = [(a,b),(b,c),(c,a)]
       where idx  i = justError (show i) . flip L.elemIndex nodes $ i
             a = idx ap
@@ -192,16 +179,21 @@ poly nodes =  (PolygonSet (zip [0..] nodes) (zip [0..] links) (zip [0..] trigs) 
 justError i (Just v)  = v
 justError i _ = error i
 
+limitrange l o [] = [(o,l)]
+limitrange l o (x:xs)
+  | distance o x > l  = [(o ,l)] <> zip xs (repeat 0)
+  | distance o x <= l  = (o, distance o x) : limitrange (l - distance o x) x xs
+
 
 -- Rendering
 
-edge :: Show a => (a, (Point2 Double, Point2 Double)) -> Solid
-edge (i,t@(a,b@(Point2 (bx,by)))) = color (0,1,0,1) $ union (moveP b $ sphere 0.6 ) $ union (moveZ 1 $ moveP cen (scale (0.05,0.05,0.05) $ text (show i)) ) $  (extrude (Polygon (reverse [conv a, (\[i,j] -> [i -0.01,j+0.01]) (conv a) , conv b , (\[i,j] -> [i - 0.01,j+0.01]) (conv b)]) []) 0.3)
+drawEdge :: Show a => (a, (Point2 Double, Point2 Double)) -> Solid
+drawEdge (i,t@(a,b@(Point2 (bx,by)))) = color (0,1,0,1) $ union (moveP b $ sphere 0.6 ) $ union (moveZ 1 $ moveP cen (scale (0.05,0.05,0.05) $ text (show i)) ) $  (extrude (Polygon (reverse [conv a, (\[i,j] -> [i -0.01,j+0.01]) (conv a) , conv b , (\[i,j] -> [i - 0.01,j+0.01]) (conv b)]) []) 0.3)
   where conv (Point2 (a,b)) = [a,b]
         cen = center t
         center (Point2 (ax,ay) , Point2 (bx,by)) = Point2 ((ax +bx)/2,(ay+by)/2)
 
-triangulate (r,(i,t@(Triangle (a,b,c)))) =  color (1,r,0,1) $ union (moveZ 1 $ moveP cen (scale (0.05,0.05,0.05) $ text (show i))) $  extrude (Polygon [conv a,conv b,conv c] [] ) 0.2
+drawTriangle (r,(i,t@(Triangle (a,b,c)))) =  color (1,r,0,1) $ union (moveZ 1 $ moveP cen (scale (0.05,0.05,0.05) $ text (show i))) $  extrude (Polygon [conv a,conv b,conv c] [] ) 0.2
   where
     cen = center t
     center (Triangle (Point2 (ax,ay),Point2 (bx,by),Point2 (cx,cy))) = Point2 ((ax + bx + cx) /3, (ay+by+cy)/3)
@@ -213,36 +205,20 @@ convV3 z (Point2 (a,b)) = (a, b, z)
 line l = [color (0,0,1,1) $ extrude (Polygon (f <> reverse (fmap (\[i,j]-> [i-0.01 ,j+0.02]) f)) []) 0.3]
   where f = fmap conv l
 
--- Display
-test :: [Point2 Double]
--- test = [Point2 (1,2), Point2 (3,4), Point2 (3.3,4.1), Point2 (4,3) ,Point2 (4,2),Point2 (4,1)]
-test = fmap Point2  pre
-pre = [(0.48,6.40), (3.04,4.80), (4.79,4.21), (7.59,9.67), (10.96,8.36), (8.33,4.31), (6,2) , (2.63,2.54), (1.62,3.44)]
-
-p1 = Point2 (0.49,6.39)
--- p2 = Point2 (5 ,2.5)
--- p2 = Point2 (7.5 ,3.9)
-p2 = Point2 (10 ,8)
-(a1,b1) = ( Point2 (1.62,3.44),Point2 (3.04,4.8) )
-
-genpath po  p1 p2 = (p1 : ) <$> f
+genpath po  p1 p2 = f
   where a  = paths p1 p2 po
-        f = funnel (0,0) p2 p1  (p1,p1)  (reorderpath p1 . portals  $ a) (-1)
+        f = fmap (\p -> (p1 :) <$> funnel (0,0) p2 p1  (p1,p1)  (reorderpath p1 p) (-1)) (portals a)
 
-limitrange l o [] = [(o,l)]
-limitrange l o (x:xs)
-  | distance o x > l  = [(o ,l)] <> zip xs (repeat 0)
-  | distance o x <= l  = (o, distance o x) : limitrange (l - distance o x) x xs
 
 plotLimitedLine (o,l) =    union (move (convV3 (-3) o ) $ extrude ( Circle  l) 1) (move (convV3 (0) o ) $sphere 0.6)
 
-t1 p1 tar test = do
-  let po = poly test
+searchPaths p1 tar poly = do
+  let po = triangulate poly
   s <- getStdGen
   let r = randoms s
-  let f = catMaybes $ fmap (genpath po p1) tar
-  let lline = concat $ fmap (\f-> plotLimitedLine <$> limitrange 20 (head f) (tail f) )f
-  T.writeFile "test.scad" (openSCAD (Statements $ [moveP p1 (sphere 1)] <> fmap (\p2 -> moveP p2 (cube 1)) tar  {-<> ( concat $ fmap edge .   (\p2 -> reorderpath p1 . portals $  paths p1 p2  po ) <$> tar )-} <> (triangulate  <$>  (zip r $ snd po)) <> lline <> (concat $ line <$> f)))
+  let f = catMaybes $ concat $ fmap (genpath po p1) tar
+  let lline = concat $ fmap (\f-> plotLimitedLine <$> limitrange 30 (head f) (tail f) )f
+  T.writeFile "test.scad" (openSCAD (Statements $ [moveP p1 (sphere 1)] <> fmap (\p2 -> moveP p2 (cube 1)) tar   <> ( concat $ concat $ fmap (fmap drawEdge ).   (\p2 -> fmap (reorderpath p1). portals $  paths p1 p2  po ) <$> tar ) <> (drawTriangle <$>  (zip r $ snd po)) <> lline <> (concat $ line <$> f)))
   return (f)
 
 
