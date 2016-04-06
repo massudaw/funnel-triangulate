@@ -42,7 +42,7 @@ data PolygonSet ix a
 
 testDXF = do
   Right f <- readDXF "/home/massudaw/src/triangulate/PATH.DXF"
-  let ([Entity a1 ob (LWPOLYLINE _ _ _ b _ _ )],hs) = splitAt 1 $ reverse $ L.sortBy (comparing (abs . Polygon.area . PolygonCW .fmap (unconvV2 .fst) . projLine)) $  filter ((== "room").layer. eref) $ entities f
+  let ([Entity a1 ob (LWPOLYLINE _ _ _ b _ _ )],hs) = splitAt 1 $ L.sortBy (flip $ comparing (abs . Polygon.area . PolygonCW .fmap (unconvV2 .fst) . projLine)) $  filter ((== "room").layer. eref) $ entities f
       door = filter ((== "origin").layer. eref) $ entities f
       projLine (Entity _ _ (LWPOLYLINE _ _ _ h _ _ )) = h
       pessoas = filter ((== "pessoa").layer. eref ) $ entities f
@@ -71,20 +71,13 @@ reorderpath p1 ((i,(a,b)):xs)
 reorderpath p1 [] = []
 
 -- build nearest path  using funnel and checking for target in sight
-funnel _ t apx (pl,pr) xl i
+funnel (ir,il) t apx (pl,pr) xl i
   | i  + 1 >= length xl =  tip
     where
-      (_,(l,r)) = xl !!  i
       deg f = id -- trace (f <> show (apx,pl,pr))
       tip
         | area2 apx pr t <= 0 &&  area2 apx pl t >= 0
           = deg "visible both" $ Just [t]
-        | area2 apx pr t <= 0 && area2 apx pl t < 0
-           =  deg "visible last left " $Just [l,t]
-        | area2 apx pl t >= 0&& area2 apx pr t > 0
-           = deg "visible last right" $ Just [r,t]
-        | otherwise
-           = deg "no case last" $ Just [t]
 funnel  (ir,il) t apx (pl,pr) xl ip =
     let
       cr = area2 apx pr r <= 0.0
@@ -98,22 +91,6 @@ funnel  (ir,il) t apx (pl,pr) xl ip =
       ret
         | cr &&  ccr  &&  cl &&   ccl
           = deg "forwb"  $ funnel (i,i) t apx (l , r) xl i
-        -- |  area2 apx pr t <= 0 &&  area2 apx pl t >= 0  && (area2 apx pl t > 0) &&  (area2 apx pr t < 0)
-        --  = deg "visible"  $  Just [t]
-        | (cr &&  not ccr ) &&  (cl &&   ccl)
-          =
-                let il = i
-                    pl = l
-                    apx = pl
-                    iapx = il
-                in (pl:) <$> deg "cutrfl"   (funnel (iapx,iapx) t apx (apx,apx) xl iapx )
-        | (cr &&  ccr)  &&  (cl &&   not ccl)
-          =
-                let ir = i
-                    pr = r
-                    apx = pr
-                    iapx = ir
-                in (pr:) <$> deg "cutlfr" (funnel  (iapx,iapx) t apx (apx,apx) xl iapx  )
         | cr
           = if ccr
               then deg "forwr"  $ funnel (i,il) t apx (pl,r) xl i
@@ -218,7 +195,7 @@ line l = [color (0,0,1,1) $ extrude (Polygon (f <> reverse (fmap (\[i,j]-> [i-0.
 
 genpath po  p1 p2 = f
   where a  = paths p1 p2 po
-        f = fmap (\p -> (p1 :) <$> funnel (0,0) p2 p1  (p1,p1)  (reorderpath p1 p) (-1)) (portals a)
+        f = fmap (\p -> (p1 :) <$> funnel (0,0) p2 p1  (p1,p1)  (reorderpath p1 p <> [(length p,(p2,p2))]) (-1)) (portals a )
 
 
 plotLimitedLine (o,l) =    union (move (convV3 (-3) o ) $ extrude ( Circle  l) 1) (move (convV3 (0) o ) $sphere 0.6)
@@ -228,7 +205,7 @@ pathDistance p =  sum $ zipWith distance p (tail p)
 searchPaths p1s tar po = do
   s <- getStdGen
   let r = randoms s
-  let f = concat $  fmap (\p1 -> catMaybes $ fmap (F.minimumBy (comparing (fmap pathDistance)) .genpath po p1) tar) p1s
+  let f = F.minimumBy (comparing (pathDistance)) <$>    fmap (\p1 -> catMaybes $ fmap ( F.minimumBy (comparing (fmap pathDistance))  . genpath po p1) tar) p1s
   let lline = concat $ fmap (\f-> plotLimitedLine <$> limitrange 30 (head f) (tail f) )f
   T.writeFile "test.scad" (openSCAD (Statements $ (flip moveP (sphere 1) <$> p1s) <> fmap (flip moveP (cube 1)) tar   <> {- ( concat $ concat $ fmap (fmap drawEdge ).   (\p2 -> fmap (reorderpath p1). portals $  paths p1 p2  po ) <$> tar ) <>-} (drawTriangle <$>  (zip r $ snd po)) <> (concat $ line <$> f)))
   return (f)
